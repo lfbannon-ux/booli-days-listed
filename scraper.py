@@ -155,51 +155,74 @@ class AsyncBooliScraper:
             # Extract real estate agency (Swedish name)
             agency = None
             try:
-                # Method 1: Look for the agency link under the broker section
-                # The agency name appears as a link below the broker name
-                agency_link = await page.query_selector('a[href*="/maklarbyra/"]')
-                if agency_link:
-                    agency = (await agency_link.inner_text()).strip()
+                # Method 1: Extract from the "Läs mer hos mäklaren" external link URL
+                # The link goes to the agency's website, e.g., fastighetsbyran.com
+                external_link = await page.query_selector('a[href*="utm_source=booli"][href*="utm_medium=referral"]')
+                if external_link:
+                    href = await external_link.get_attribute('href') or ""
+                    # Extract domain from URL
+                    domain_match = re.search(r'https?://(?:www\.)?([^/]+)', href)
+                    if domain_match:
+                        domain = domain_match.group(1).lower()
+                        # Map common domains to agency names
+                        agency_domains = {
+                            'fastighetsbyran.com': 'Fastighetsbyrån',
+                            'svenskfast.se': 'Svensk Fastighetsförmedling',
+                            'lansfast.se': 'Länsförsäkringar Fastighetsförmedling',
+                            'bjurfors.se': 'Bjurfors',
+                            'erikolsson.se': 'Erik Olsson',
+                            'skandiamaklarna.se': 'SkandiaMäklarna',
+                            'husmanhagberg.se': 'HusmanHagberg',
+                            'notar.se': 'Notar',
+                            'maklarhuset.se': 'Mäklarhuset',
+                            'svenskamaklarhuset.se': 'Svenska Mäklarhuset',
+                            'era.se': 'ERA',
+                            'hemverket.se': 'Hemverket',
+                            'innerstadsspecialisten.se': 'Innerstadsspecialisten',
+                            'karlssons.se': 'Karlssons Mäklarbyrå',
+                            'alexanderwhite.se': 'Alexander White',
+                            'perjansson.se': 'Per Jansson',
+                            'historiskahem.se': 'Historiska Hem',
+                            'mohv.se': 'MOHV',
+                            'wrede.se': 'Wrede',
+                            'magnusson.se': 'Magnusson Mäkleri',
+                            'coldwellbanker.se': 'Coldwell Banker',
+                            'century21.se': 'Century 21',
+                            'bovision.se': 'Bovision',
+                            'fantastic-frank.se': 'Fantastic Frank',
+                            'ahreborger.se': 'Åhre Borger',
+                            'sothebysrealty.se': "Sotheby's International Realty",
+                        }
+                        for agency_domain, agency_name in agency_domains.items():
+                            if agency_domain in domain:
+                                agency = agency_name
+                                break
+                        
+                        # If not in our list, try to make a readable name from domain
+                        if not agency:
+                            # e.g., "fastighetsbyran.com" -> "Fastighetsbyran"
+                            domain_name = domain.split('.')[0]
+                            agency = domain_name.replace('-', ' ').title()
                 
-                # Method 2: Try alternate selector for agency link
+                # Method 2: Look for agency name in broker section (but not footer)
                 if not agency:
-                    agency_link = await page.query_selector('a[href*="/maklare/"] + a, a[href*="maklarbyra"]')
-                    if agency_link:
-                        agency = (await agency_link.inner_text()).strip()
-                
-                # Method 3: Look in the broker card section for agency text
-                if not agency:
-                    broker_section = await page.query_selector('[class*="broker"], [class*="agent"], [class*="mäklare"]')
+                    # Find the broker section specifically
+                    broker_section = await page.query_selector('h2:has-text("Ansvarig mäklare"), h2:has-text("Responsible broker")')
                     if broker_section:
-                        broker_text = await broker_section.inner_text()
-                        # Agency is usually on its own line after the broker name and rating
-                        lines = [l.strip() for l in broker_text.split('\n') if l.strip()]
-                        for i, line in enumerate(lines):
-                            # Skip lines with ratings, contact buttons, names
-                            if '/' in line and 'review' in broker_text.lower():  # Skip "5/5 (51 reviews)"
-                                continue
-                            if 'kontakta' in line.lower() or 'contact' in line.lower():
-                                continue
-                            if i > 0 and len(line) > 3 and not line[0].isdigit():
-                                # This might be the agency name
-                                agency = line
-                                break
+                        # Get the next sibling or parent container
+                        broker_container = await broker_section.evaluate_handle('el => el.parentElement || el.nextElementSibling')
+                        if broker_container:
+                            broker_text = await broker_container.inner_text()
+                            # Look for agency name pattern - usually after rating stars
+                            lines = [l.strip() for l in broker_text.split('\n') if l.strip()]
+                            for line in lines:
+                                # Skip common non-agency text
+                                if any(skip in line.lower() for skip in ['kontakta', 'contact', 'recensioner', 'reviews', '/', 'mäklare', 'broker', 'ansvarig']):
+                                    continue
+                                if len(line) > 3 and len(line) < 50 and not line[0].isdigit():
+                                    agency = line
+                                    break
                 
-                # Method 4: Search for common Swedish agency names in page text
-                if not agency:
-                    swedish_agencies = [
-                        'Fastighetsbyrån', 'Svensk Fastighetsförmedling', 'Länsförsäkringar',
-                        'Bjurfors', 'Erik Olsson', 'Skandiamäklarna', 'HusmanHagberg',
-                        'Swedbank', 'Hemverket', 'Notar', 'SkandiaMäklarna', 'Mäklarhuset',
-                        'ERA', 'Coldwell Banker', 'Svenska Mäklarhuset', 'Innerstadsspecialisten',
-                    ]
-                    for agency_name in swedish_agencies:
-                        if agency_name.lower() in body_text.lower():
-                            # Find the exact case version in the text
-                            match = re.search(re.escape(agency_name), body_text, re.IGNORECASE)
-                            if match:
-                                agency = match.group(0)
-                                break
             except Exception:
                 pass
             
