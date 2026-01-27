@@ -231,17 +231,19 @@ async def main():
     max_listings = os.environ.get('MAX_LISTINGS')
     max_listings = int(max_listings) if max_listings else None
     num_workers = int(os.environ.get('NUM_WORKERS', 5))
+    delay = float(os.environ.get('DELAY', 0.3))
     
-    print(f"Max pages: {max_pages or 'All (~2,451)'}")
-    print(f"Max listings: {max_listings or 'All (~85,000)'}")
+    print(f"Max pages: {max_pages or 'All'}")
+    print(f"Max listings: {max_listings or 'All'}")
     print(f"Workers: {num_workers}")
+    print(f"Delay: {delay}s")
     print()
     print("Note: This scraper visits each listing page individually to get exact 'days on Booli'")
     print()
     
     scraper = AsyncBooliScraper(
         num_workers=num_workers,
-        delay=0.5
+        delay=delay
     )
     
     start_time = datetime.now()
