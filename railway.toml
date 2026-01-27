@@ -1,0 +1,9 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# No web server - this is a scheduled job
+numReplicas = 0
+sleepApplication = true
+restartPolicyType = "never"
