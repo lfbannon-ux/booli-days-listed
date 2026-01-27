@@ -80,37 +80,59 @@ def send_email(
 
 
 def generate_html_report(df: pd.DataFrame, summary: dict) -> str:
-    """Generate an HTML email report."""
-    # Recent listings (last 7 days)
+    """Generate an HTML email report (English)."""
+    df = df.copy()
     df['received_date'] = pd.to_datetime(df['received_date'])
+    
+    # Recent listings (last 7 days)
     recent = df[df['received_date'] >= (datetime.now() - pd.Timedelta(days=7))]
     
-    # Date distribution for last 14 days
-    date_counts = df.groupby(df['received_date'].dt.date).size().sort_index().tail(14)
+    # Count for sale vs coming soon
+    for_sale_count = len(df[df['is_coming_soon'] == False]) if 'is_coming_soon' in df.columns else len(df)
+    coming_soon_count = df['is_coming_soon'].sum() if 'is_coming_soon' in df.columns else 0
     
-    # Coming soon count
-    coming_soon = df['is_coming_soon'].sum() if 'is_coming_soon' in df.columns else 0
+    # Date distribution with status breakdown (last 14 days)
+    df_with_dates = df[df['received_date'].notna()].copy()
+    df_with_dates['date'] = df_with_dates['received_date'].dt.date
+    df_with_dates['status'] = df_with_dates['is_coming_soon'].apply(lambda x: 'Coming Soon' if x else 'For Sale')
+    
+    date_status_counts = df_with_dates.groupby(['date', 'status']).size().unstack(fill_value=0)
+    date_status_counts = date_status_counts.sort_index().tail(14)
+    
+    # Translate property types
+    property_type_translations = {
+        'Lägenhet': 'Apartment',
+        'Villa': 'House',
+        'Radhus': 'Townhouse',
+        'Kedjehus': 'Semi-detached',
+        'Parhus': 'Duplex',
+        'Fritidshus': 'Vacation Home',
+        'Tomt/Mark': 'Land/Plot',
+        'Gård': 'Farm/Estate',
+    }
     
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <style>
-            body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
+            body {{ font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; }}
             h1 {{ color: #FF620F; }}
             h2 {{ color: #333; border-bottom: 2px solid #FF620F; padding-bottom: 5px; }}
             table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
             th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
             th {{ background-color: #FF620F; color: white; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
-            .stat-box {{ display: inline-block; background: #f5f5f5; padding: 15px 25px; margin: 10px; border-radius: 8px; }}
+            .stat-box {{ display: inline-block; background: #f5f5f5; padding: 15px 25px; margin: 10px; border-radius: 8px; text-align: center; }}
             .stat-number {{ font-size: 24px; font-weight: bold; color: #FF620F; }}
             .stat-label {{ font-size: 12px; color: #666; }}
+            .for-sale {{ color: #2e7d32; }}
+            .coming-soon {{ color: #1565c0; }}
         </style>
     </head>
     <body>
         <h1>🏠 Booli Listings Report</h1>
-        <p>Scraped on {datetime.now().strftime('%Y-%m-%d %H:%M')} (UTC)</p>
+        <p>Scraped on {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC</p>
         
         <div>
             <div class="stat-box">
@@ -118,26 +140,33 @@ def generate_html_report(df: pd.DataFrame, summary: dict) -> str:
                 <div class="stat-label">Total Listings</div>
             </div>
             <div class="stat-box">
+                <div class="stat-number for-sale">{for_sale_count:,}</div>
+                <div class="stat-label">For Sale</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number coming-soon">{coming_soon_count:,}</div>
+                <div class="stat-label">Coming Soon</div>
+            </div>
+            <div class="stat-box">
                 <div class="stat-number">{len(recent):,}</div>
                 <div class="stat-label">New (Last 7 Days)</div>
             </div>
             <div class="stat-box">
-                <div class="stat-number">{coming_soon:,}</div>
-                <div class="stat-label">Coming Soon</div>
-            </div>
-            <div class="stat-box">
                 <div class="stat-number">{summary.get('avg_days_on_booli', 0):.0f}</div>
-                <div class="stat-label">Avg Days on Booli</div>
+                <div class="stat-label">Avg Days Listed</div>
             </div>
         </div>
         
         <h2>📅 Listings by Date (Last 14 Days)</h2>
         <table>
-            <tr><th>Date</th><th>Listings</th></tr>
+            <tr><th>Date</th><th>For Sale</th><th>Coming Soon</th><th>Total</th></tr>
     """
     
-    for date, count in date_counts.items():
-        html += f"<tr><td>{date}</td><td>{count:,}</td></tr>\n"
+    for date in date_status_counts.index:
+        for_sale = date_status_counts.loc[date, 'For Sale'] if 'For Sale' in date_status_counts.columns else 0
+        coming_soon = date_status_counts.loc[date, 'Coming Soon'] if 'Coming Soon' in date_status_counts.columns else 0
+        total = for_sale + coming_soon
+        html += f"<tr><td>{date}</td><td class='for-sale'>{for_sale:,}</td><td class='coming-soon'>{coming_soon:,}</td><td>{total:,}</td></tr>\n"
     
     html += """
         </table>
@@ -149,7 +178,8 @@ def generate_html_report(df: pd.DataFrame, summary: dict) -> str:
     
     if summary.get('by_property_type'):
         for ptype, count in sorted(summary['by_property_type'].items(), key=lambda x: x[1], reverse=True):
-            html += f"<tr><td>{ptype or 'Unknown'}</td><td>{count:,}</td></tr>\n"
+            english_type = property_type_translations.get(ptype, ptype) if ptype else 'Unknown'
+            html += f"<tr><td>{english_type}</td><td>{count:,}</td></tr>\n"
     
     html += """
         </table>
@@ -158,10 +188,10 @@ def generate_html_report(df: pd.DataFrame, summary: dict) -> str:
         <table>
             <tr><th>Metric</th><th>Value</th></tr>
             <tr><td>Date Range</td><td>{earliest} to {latest}</td></tr>
-            <tr><td>With Date</td><td>{with_date:,}</td></tr>
+            <tr><td>Listings with Date</td><td>{with_date:,}</td></tr>
             <tr><td>Missing Date</td><td>{missing_date:,}</td></tr>
-            <tr><td>Avg Days on Booli</td><td>{avg_days:.1f}</td></tr>
-            <tr><td>Median Days on Booli</td><td>{median_days:.1f}</td></tr>
+            <tr><td>Average Days Listed</td><td>{avg_days:.1f}</td></tr>
+            <tr><td>Median Days Listed</td><td>{median_days:.1f}</td></tr>
         </table>
         
         <p style="color: #666; font-size: 12px; margin-top: 30px;">
