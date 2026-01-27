@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Booli.se Async Scraper Module - v3
+Booli.se Async Scraper Module - v4
 
-Two-phase scraper:
-1. Collects all listing URLs from search pages (both till-salu and nyproduktion)
+Two-phase scraper with retry logic:
+1. Collects all listing URLs from search pages (till-salu, snart-till-salu, nyproduktion)
 2. Visits each individual listing page to get exact "for sale for X days" count
+3. Retries failed pages up to 3 times
 """
 
 import asyncio
@@ -25,17 +26,21 @@ class AsyncBooliScraper:
         'nyproduktion': 'https://www.booli.se/sok/till-salu?isNewConstruction=1',
     }
     
-    def __init__(self, num_workers: int = 5, delay: float = 0.3):
+    def __init__(self, num_workers: int = 5, delay: float = 0.3, max_retries: int = 3):
         self.num_workers = num_workers
         self.delay = delay
+        self.max_retries = max_retries
         self.listings = []
-        self.listing_urls = []  # List of tuples: (url, source_type)
+        self.listing_urls = []  # List of tuples: (url, source_type, is_duplicate_url)
+        self.failed_urls = []   # Track failed URLs for retry
         self.today = datetime.now().date()
         self.lock = asyncio.Lock()
         self.pages_completed = 0
         self.listings_completed = 0
         self.total_pages = 0
         self.total_listings = 0
+        self.success_count = 0
+        self.fail_count = 0
         
     async def extract_listing_urls(self, page: Page, source_type: str = 'till-salu') -> list[tuple[str, str]]:
         """Extract all listing URLs from a search results page."""
@@ -54,8 +59,10 @@ class AsyncBooliScraper:
                 if '/bostad/' in href or '/annons/' in href or '/projekt/' in href:
                     if href.startswith('/'):
                         href = f"https://www.booli.se{href}"
-                    if href not in [u[0] for u in urls]:
-                        urls.append((href, source_type))
+                    # Only add booli.se URLs, skip external project URLs
+                    if 'booli.se' in href:
+                        if href not in [u[0] for u in urls]:
+                            urls.append((href, source_type))
             except Exception:
                 continue
         
@@ -157,7 +164,6 @@ class AsyncBooliScraper:
             agency = None
             try:
                 # Method 1: Extract from the "Läs mer hos mäklaren" external link URL
-                # The link goes to the agency's website, e.g., fastighetsbyran.com
                 external_link = await page.query_selector('a[href*="utm_source=booli"][href*="utm_medium=referral"]')
                 if external_link:
                     href = await external_link.get_attribute('href') or ""
@@ -201,23 +207,18 @@ class AsyncBooliScraper:
                         
                         # If not in our list, try to make a readable name from domain
                         if not agency:
-                            # e.g., "fastighetsbyran.com" -> "Fastighetsbyran"
                             domain_name = domain.split('.')[0]
                             agency = domain_name.replace('-', ' ').title()
                 
                 # Method 2: Look for agency name in broker section (but not footer)
                 if not agency:
-                    # Find the broker section specifically
                     broker_section = await page.query_selector('h2:has-text("Ansvarig mäklare"), h2:has-text("Responsible broker")')
                     if broker_section:
-                        # Get the next sibling or parent container
                         broker_container = await broker_section.evaluate_handle('el => el.parentElement || el.nextElementSibling')
                         if broker_container:
                             broker_text = await broker_container.inner_text()
-                            # Look for agency name pattern - usually after rating stars
                             lines = [l.strip() for l in broker_text.split('\n') if l.strip()]
                             for line in lines:
-                                # Skip common non-agency text
                                 if any(skip in line.lower() for skip in ['kontakta', 'contact', 'recensioner', 'reviews', '/', 'mäklare', 'broker', 'ansvarig']):
                                     continue
                                 if len(line) > 3 and len(line) < 50 and not line[0].isdigit():
@@ -247,11 +248,12 @@ class AsyncBooliScraper:
                 'source': source_type,
                 'agency': agency,
                 'page_views': page_views,
+                'scrape_failed': False,
                 'scraped_at': datetime.now().isoformat(),
             }
             
         except Exception as e:
-            print(f"\n  Warning: Error on {url}: {e}")
+            # Don't print here - let the worker handle it
             return None
     
     async def get_total_pages(self, page: Page) -> int:
@@ -274,8 +276,8 @@ class AsyncBooliScraper:
         except Exception:
             return 1
     
-    async def url_collector_worker(self, context: BrowserContext, page_queue: asyncio.Queue):
-        """Worker that collects listing URLs from search pages."""
+    async def url_collector_worker(self, context: BrowserContext, page_queue: asyncio.Queue, failed_queue: asyncio.Queue):
+        """Worker that collects listing URLs from search pages with retry support."""
         page = await context.new_page()
         
         while True:
@@ -284,7 +286,7 @@ class AsyncBooliScraper:
             except asyncio.TimeoutError:
                 break
             
-            page_num, source_type, base_url = item
+            page_num, source_type, base_url, attempt = item
             # Handle URLs that already have query parameters
             if '?' in base_url:
                 url = f"{base_url}&page={page_num}" if page_num > 1 else base_url
@@ -310,14 +312,18 @@ class AsyncBooliScraper:
                     print(f"\r  Phase 1: {self.pages_completed}/{self.total_pages} pages ({progress:.1f}%) - {len(self.listing_urls)} URLs ({unique_urls} unique)", end='', flush=True)
                 
             except Exception as e:
-                print(f"\n  Warning: Error on search page {page_num}: {e}")
+                if attempt < self.max_retries:
+                    # Re-queue for retry
+                    await failed_queue.put((page_num, source_type, base_url, attempt + 1))
+                else:
+                    print(f"\n  Failed after {self.max_retries} attempts: page {page_num} ({source_type})")
             
             page_queue.task_done()
         
         await page.close()
     
-    async def detail_scraper_worker(self, context: BrowserContext, url_queue: asyncio.Queue):
-        """Worker that scrapes individual listing pages."""
+    async def detail_scraper_worker(self, context: BrowserContext, url_queue: asyncio.Queue, failed_queue: asyncio.Queue):
+        """Worker that scrapes individual listing pages with retry support."""
         page = await context.new_page()
         
         while True:
@@ -326,26 +332,99 @@ class AsyncBooliScraper:
             except asyncio.TimeoutError:
                 break
             
-            url, source_type, is_duplicate_url = item
+            url, source_type, is_duplicate_url, attempt = item
             details = await self.extract_listing_details(page, url, source_type)
             
             async with self.lock:
                 if details:
                     details['is_duplicate_url'] = is_duplicate_url
                     self.listings.append(details)
+                    self.success_count += 1
+                else:
+                    # Failed - queue for retry if attempts remain
+                    if attempt < self.max_retries:
+                        await failed_queue.put((url, source_type, is_duplicate_url, attempt + 1))
+                    else:
+                        self.fail_count += 1
+                        # Add a placeholder entry for failed URLs
+                        self.listings.append({
+                            'listing_id': url.split('/')[-1],
+                            'url': url,
+                            'address': None,
+                            'property_type': None,
+                            'price_sek': None,
+                            'monthly_fee_sek': None,
+                            'area_sqm': None,
+                            'rooms': None,
+                            'floor': None,
+                            'days_on_booli': None,
+                            'received_date': None,
+                            'is_coming_soon': None,
+                            'is_new_production': source_type == 'nyproduktion' or '/projekt/' in url,
+                            'source': source_type,
+                            'agency': None,
+                            'page_views': None,
+                            'is_duplicate_url': is_duplicate_url,
+                            'scrape_failed': True,
+                            'scraped_at': datetime.now().isoformat(),
+                        })
+                
                 self.listings_completed += 1
                 progress = (self.listings_completed / self.total_listings) * 100
-                print(f"\r  Phase 2: {self.listings_completed}/{self.total_listings} listings ({progress:.1f}%)", end='', flush=True)
+                if self.listings_completed % 100 == 0:  # Reduce log spam
+                    print(f"\r  Phase 2: {self.listings_completed}/{self.total_listings} ({progress:.1f}%) - OK: {self.success_count}, Retrying: {failed_queue.qsize()}, Failed: {self.fail_count}", end='', flush=True)
             
             url_queue.task_done()
         
         await page.close()
     
+    async def process_retry_queue(self, browser, queue: asyncio.Queue, worker_func, phase: str):
+        """Process items in the retry queue."""
+        if queue.empty():
+            return
+            
+        retry_count = queue.qsize()
+        print(f"\n  Retrying {retry_count} failed {phase}...")
+        
+        # Create new work queue from failed items
+        work_queue = asyncio.Queue()
+        failed_queue = asyncio.Queue()
+        
+        while not queue.empty():
+            item = await queue.get()
+            await work_queue.put(item)
+        
+        # Use fewer workers for retries to reduce memory pressure
+        retry_workers = max(2, self.num_workers // 2)
+        
+        workers = []
+        worker_contexts = []
+        
+        for i in range(retry_workers):
+            worker_context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent=f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Retry/{i}'
+            )
+            worker_contexts.append(worker_context)
+            workers.append(asyncio.create_task(
+                worker_func(worker_context, work_queue, failed_queue)
+            ))
+        
+        await asyncio.gather(*workers)
+        
+        for ctx in worker_contexts:
+            await ctx.close()
+        
+        # If there are still failed items, process them again
+        if not failed_queue.empty():
+            await self.process_retry_queue(browser, failed_queue, worker_func, phase)
+    
     async def scrape(self, max_pages: Optional[int] = None, max_listings: Optional[int] = None) -> list[dict]:
         """
-        Two-phase scrape:
-        1. Collect all listing URLs from search pages (till-salu + nyproduktion)
+        Two-phase scrape with retry logic:
+        1. Collect all listing URLs from search pages (till-salu + snart-till-salu + nyproduktion)
         2. Visit each listing page for detailed info including exact days
+        3. Retry failed pages up to max_retries times
         """
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -356,7 +435,7 @@ class AsyncBooliScraper:
             )
             
             try:
-                # === PHASE 1: Collect URLs from both sources ===
+                # === PHASE 1: Collect URLs from all sources ===
                 page = await context.new_page()
                 
                 # Handle cookie consent once
@@ -370,7 +449,7 @@ class AsyncBooliScraper:
                 except Exception:
                     pass
                 
-                # Get page counts for both sources
+                # Get page counts for all sources
                 source_pages = {}
                 for source_type, base_url in self.SOURCES.items():
                     await page.goto(base_url, wait_until='networkidle', timeout=30000)
@@ -397,11 +476,13 @@ class AsyncBooliScraper:
                 
                 await page.close()
                 
-                # Queue remaining pages for both sources
+                # Queue remaining pages for all sources
                 page_queue = asyncio.Queue()
+                failed_page_queue = asyncio.Queue()
+                
                 for source_type, base_url in self.SOURCES.items():
                     for page_num in range(2, source_pages[source_type] + 1):
-                        await page_queue.put((page_num, source_type, base_url))
+                        await page_queue.put((page_num, source_type, base_url, 1))  # attempt = 1
                 
                 # Start URL collector workers
                 workers = []
@@ -414,7 +495,7 @@ class AsyncBooliScraper:
                     )
                     worker_contexts.append(worker_context)
                     workers.append(asyncio.create_task(
-                        self.url_collector_worker(worker_context, page_queue)
+                        self.url_collector_worker(worker_context, page_queue, failed_page_queue)
                     ))
                 
                 await asyncio.gather(*workers)
@@ -422,18 +503,25 @@ class AsyncBooliScraper:
                 for ctx in worker_contexts:
                     await ctx.close()
                 
-                print(f"\n  Collected {len(self.listing_urls)} unique listing URLs")
+                # Process retries for Phase 1
+                await self.process_retry_queue(browser, failed_page_queue, self.url_collector_worker, "pages")
+                
+                unique_urls = len(set(x[0] for x in self.listing_urls))
+                print(f"\n  Collected {len(self.listing_urls)} URLs ({unique_urls} unique)")
                 
                 # === PHASE 2: Scrape individual listings ===
                 if max_listings:
                     self.listing_urls = self.listing_urls[:max_listings]
                 
                 self.total_listings = len(self.listing_urls)
-                print(f"\n=== Phase 2: Scraping {self.total_listings} listing pages for exact days ===")
+                print(f"\n=== Phase 2: Scraping {self.total_listings} listing pages ===")
                 
                 url_queue = asyncio.Queue()
+                failed_url_queue = asyncio.Queue()
+                
                 for url_tuple in self.listing_urls:
-                    await url_queue.put(url_tuple)
+                    # Add attempt counter: (url, source_type, is_duplicate, attempt)
+                    await url_queue.put((url_tuple[0], url_tuple[1], url_tuple[2], 1))
                 
                 # Start detail scraper workers
                 workers = []
@@ -446,7 +534,7 @@ class AsyncBooliScraper:
                     )
                     worker_contexts.append(worker_context)
                     workers.append(asyncio.create_task(
-                        self.detail_scraper_worker(worker_context, url_queue)
+                        self.detail_scraper_worker(worker_context, url_queue, failed_url_queue)
                     ))
                 
                 await asyncio.gather(*workers)
@@ -454,7 +542,10 @@ class AsyncBooliScraper:
                 for ctx in worker_contexts:
                     await ctx.close()
                 
-                print()
+                # Process retries for Phase 2
+                await self.process_retry_queue(browser, failed_url_queue, self.detail_scraper_worker, "listings")
+                
+                print(f"\n  Completed: {self.success_count} successful, {self.fail_count} failed after retries")
                 
             finally:
                 await browser.close()
@@ -488,12 +579,15 @@ class AsyncBooliScraper:
         # Count duplicates
         duplicate_urls = df['is_duplicate_url'].sum() if 'is_duplicate_url' in df.columns else 0
         duplicate_ids = df['is_duplicate_listing_id'].sum() if 'is_duplicate_listing_id' in df.columns else 0
+        failed_scrapes = df['scrape_failed'].sum() if 'scrape_failed' in df.columns else 0
         
         return {
             'total_listings': len(df),
             'unique_ids': df['listing_id'].nunique(),
             'duplicate_urls': int(duplicate_urls),
             'duplicate_listing_ids': int(duplicate_ids),
+            'failed_scrapes': int(failed_scrapes),
+            'successful_scrapes': int(self.success_count),
             'with_date': df['received_date'].notna().sum(),
             'missing_date': df['received_date'].isna().sum(),
             'coming_soon': df['is_coming_soon'].sum() if 'is_coming_soon' in df.columns else 0,
