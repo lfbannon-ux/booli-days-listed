@@ -294,11 +294,15 @@ class AsyncBooliScraper:
                 
                 async with self.lock:
                     for u in urls:
-                        if u[0] not in [x[0] for x in self.listing_urls]:
-                            self.listing_urls.append(u)
+                        # Track if this URL is a duplicate
+                        is_duplicate = u[0] in [x[0] for x in self.listing_urls]
+                        # Add tuple: (url, source_type, is_duplicate_url)
+                        self.listing_urls.append((u[0], u[1], is_duplicate))
                     self.pages_completed += 1
+                    # Count unique URLs
+                    unique_urls = len(set(x[0] for x in self.listing_urls))
                     progress = (self.pages_completed / self.total_pages) * 100
-                    print(f"\r  Phase 1: {self.pages_completed}/{self.total_pages} pages ({progress:.1f}%) - {len(self.listing_urls)} URLs", end='', flush=True)
+                    print(f"\r  Phase 1: {self.pages_completed}/{self.total_pages} pages ({progress:.1f}%) - {len(self.listing_urls)} URLs ({unique_urls} unique)", end='', flush=True)
                 
             except Exception as e:
                 print(f"\n  Warning: Error on search page {page_num}: {e}")
@@ -317,11 +321,12 @@ class AsyncBooliScraper:
             except asyncio.TimeoutError:
                 break
             
-            url, source_type = item
+            url, source_type, is_duplicate_url = item
             details = await self.extract_listing_details(page, url, source_type)
             
             async with self.lock:
                 if details:
+                    details['is_duplicate_url'] = is_duplicate_url
                     self.listings.append(details)
                 self.listings_completed += 1
                 progress = (self.listings_completed / self.total_listings) * 100
@@ -379,7 +384,10 @@ class AsyncBooliScraper:
                     await page.goto(base_url, wait_until='networkidle', timeout=30000)
                     await asyncio.sleep(1)
                     first_urls = await self.extract_listing_urls(page, source_type)
-                    self.listing_urls.extend(first_urls)
+                    # Convert to tuple format with is_duplicate flag
+                    for u in first_urls:
+                        is_duplicate = u[0] in [x[0] for x in self.listing_urls]
+                        self.listing_urls.append((u[0], u[1], is_duplicate))
                     self.pages_completed += 1
                 
                 await page.close()
@@ -446,6 +454,18 @@ class AsyncBooliScraper:
             finally:
                 await browser.close()
         
+        # Post-process: mark duplicate listing IDs
+        seen_ids = {}
+        for listing in self.listings:
+            lid = listing.get('listing_id')
+            if lid in seen_ids:
+                listing['is_duplicate_listing_id'] = True
+                # Also mark the first occurrence
+                seen_ids[lid]['is_duplicate_listing_id'] = True
+            else:
+                listing['is_duplicate_listing_id'] = False
+                seen_ids[lid] = listing
+        
         return self.listings
     
     def get_summary(self) -> dict:
@@ -460,9 +480,15 @@ class AsyncBooliScraper:
         if df['received_date'].notna().any():
             date_counts = df.groupby(df['received_date'].dt.date).size().sort_index().to_dict()
         
+        # Count duplicates
+        duplicate_urls = df['is_duplicate_url'].sum() if 'is_duplicate_url' in df.columns else 0
+        duplicate_ids = df['is_duplicate_listing_id'].sum() if 'is_duplicate_listing_id' in df.columns else 0
+        
         return {
             'total_listings': len(df),
             'unique_ids': df['listing_id'].nunique(),
+            'duplicate_urls': int(duplicate_urls),
+            'duplicate_listing_ids': int(duplicate_ids),
             'with_date': df['received_date'].notna().sum(),
             'missing_date': df['received_date'].isna().sum(),
             'coming_soon': df['is_coming_soon'].sum() if 'is_coming_soon' in df.columns else 0,
