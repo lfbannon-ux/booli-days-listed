@@ -20,8 +20,9 @@ class AsyncBooliScraper:
     """Async scraper that visits individual listing pages for accurate day counts."""
     
     SOURCES = {
-        'till-salu': 'https://www.booli.se/sok/till-salu',
-        'nyproduktion': 'https://www.booli.se/sok/nyproduktion',
+        'till-salu': 'https://www.booli.se/sok/till-salu?upcomingSale=0',
+        'snart-till-salu': 'https://www.booli.se/sok/till-salu?upcomingSale=1',
+        'nyproduktion': 'https://www.booli.se/sok/till-salu?isNewConstruction=1',
     }
     
     def __init__(self, num_workers: int = 5, delay: float = 0.3):
@@ -284,7 +285,11 @@ class AsyncBooliScraper:
                 break
             
             page_num, source_type, base_url = item
-            url = f"{base_url}?page={page_num}" if page_num > 1 else base_url
+            # Handle URLs that already have query parameters
+            if '?' in base_url:
+                url = f"{base_url}&page={page_num}" if page_num > 1 else base_url
+            else:
+                url = f"{base_url}?page={page_num}" if page_num > 1 else base_url
             
             try:
                 await page.goto(url, wait_until='networkidle', timeout=30000)
