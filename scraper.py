@@ -459,8 +459,9 @@ class AsyncBooliScraper:
                 # === PHASE 1: Collect URLs from all sources ===
                 page = await context.new_page()
                 
-                # Handle cookie consent once
-                await page.goto(self.SOURCES['till-salu'], wait_until='networkidle', timeout=30000)
+                # Handle cookie consent once (use first source)
+                first_source_url = list(self.SOURCES.values())[0]
+                await page.goto(first_source_url, wait_until='networkidle', timeout=30000)
                 await asyncio.sleep(2)
                 try:
                     cookie_button = await page.query_selector('button:has-text("Acceptera"), button:has-text("Godkänn")')
