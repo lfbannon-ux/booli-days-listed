@@ -20,14 +20,15 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 class AsyncBooliScraper:
     """Async scraper that visits individual listing pages for accurate day counts."""
     
-    # Property types and statuses to scrape
+    # Property types (URL-encoded where needed) and statuses to scrape
+    # Using URL-safe versions to avoid double-encoding
     PROPERTY_TYPES = [
-        'Lägenhet',
-        'Villa', 
-        'Kedjehus-Parhus-Radhus',  # Combined townhouse types
-        'Fritidshus',
-        'Tomt%2FMark',  # URL encoded Tomt/Mark
-        'Gård',
+        ('Lägenhet', 'L%C3%A4genhet'),           # ä = %C3%A4
+        ('Villa', 'Villa'), 
+        ('Kedjehus-Parhus-Radhus', 'Kedjehus-Parhus-Radhus'),
+        ('Fritidshus', 'Fritidshus'),
+        ('Tomt-Mark', 'Tomt%2FMark'),            # / = %2F
+        ('Gård', 'G%C3%A5rd'),                   # å = %C3%A5
     ]
     
     STATUSES = {
@@ -37,12 +38,12 @@ class AsyncBooliScraper:
     
     # Generate all source combinations
     SOURCES = {}
-    for prop_type in PROPERTY_TYPES:
+    for display_name, url_encoded in PROPERTY_TYPES:
         for status_name, status_param in STATUSES.items():
             # Clean property type name for dict key
-            clean_type = prop_type.replace('%2F', '-').replace('-', '-').lower()
+            clean_type = display_name.lower().replace('/', '-')
             source_key = f"{clean_type}-{status_name}"
-            SOURCES[source_key] = f"https://www.booli.se/sok/till-salu?objectType={prop_type}&{status_param}"
+            SOURCES[source_key] = f"https://www.booli.se/sok/till-salu?objectType={url_encoded}&{status_param}"
     
     # Add nyproduktion separately (smaller, no need to split by type)
     SOURCES['nyproduktion'] = 'https://www.booli.se/sok/till-salu?isNewConstruction=1'
