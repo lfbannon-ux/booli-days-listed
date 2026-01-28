@@ -20,11 +20,32 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 class AsyncBooliScraper:
     """Async scraper that visits individual listing pages for accurate day counts."""
     
-    SOURCES = {
-        'till-salu': 'https://www.booli.se/sok/till-salu?upcomingSale=0',
-        'snart-till-salu': 'https://www.booli.se/sok/till-salu?upcomingSale=1',
-        'nyproduktion': 'https://www.booli.se/sok/till-salu?isNewConstruction=1',
+    # Property types and statuses to scrape
+    PROPERTY_TYPES = [
+        'Lägenhet',
+        'Villa', 
+        'Kedjehus-Parhus-Radhus',  # Combined townhouse types
+        'Fritidshus',
+        'Tomt%2FMark',  # URL encoded Tomt/Mark
+        'Gård',
+    ]
+    
+    STATUSES = {
+        'till-salu': 'upcomingSale=0',
+        'snart-till-salu': 'upcomingSale=1',
     }
+    
+    # Generate all source combinations
+    SOURCES = {}
+    for prop_type in PROPERTY_TYPES:
+        for status_name, status_param in STATUSES.items():
+            # Clean property type name for dict key
+            clean_type = prop_type.replace('%2F', '-').replace('-', '-').lower()
+            source_key = f"{clean_type}-{status_name}"
+            SOURCES[source_key] = f"https://www.booli.se/sok/till-salu?objectType={prop_type}&{status_param}"
+    
+    # Add nyproduktion separately (smaller, no need to split by type)
+    SOURCES['nyproduktion'] = 'https://www.booli.se/sok/till-salu?isNewConstruction=1'
     
     def __init__(self, num_workers: int = 5, delay: float = 0.3, max_retries: int = 3):
         self.num_workers = num_workers
