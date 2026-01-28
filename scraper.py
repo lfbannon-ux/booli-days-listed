@@ -475,7 +475,7 @@ class AsyncBooliScraper:
                 # Get page counts for all sources
                 source_pages = {}
                 for source_type, base_url in self.SOURCES.items():
-                    await page.goto(base_url, wait_until='networkidle', timeout=30000)
+                    await page.goto(base_url, wait_until='networkidle', timeout=60000)
                     await asyncio.sleep(1)
                     pages = await self.get_total_pages(page)
                     if max_pages:
