@@ -10,11 +10,25 @@ Two-phase scraper with retry logic:
 
 import asyncio
 import re
+import random
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
 from playwright.async_api import async_playwright, Page, BrowserContext
+
+
+# Realistic user agents to rotate
+USER_AGENTS = [
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+]
 
 
 class AsyncBooliScraper:
@@ -63,6 +77,39 @@ class AsyncBooliScraper:
         self.total_listings = 0
         self.success_count = 0
         self.fail_count = 0
+    
+    async def create_stealth_context(self, browser, worker_id: int = 0) -> BrowserContext:
+        """Create a browser context with stealth settings to avoid detection."""
+        context = await browser.new_context(
+            viewport={'width': random.randint(1200, 1920), 'height': random.randint(800, 1080)},
+            user_agent=random.choice(USER_AGENTS),
+            locale='sv-SE',
+            timezone_id='Europe/Stockholm',
+            java_script_enabled=True,
+            bypass_csp=True,
+            extra_http_headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+            }
+        )
+        
+        # Inject stealth scripts
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.navigator.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['sv-SE', 'sv', 'en-US', 'en'] });
+        """)
+        
+        return context
         
     async def extract_listing_urls(self, page: Page, source_type: str = 'till-salu') -> list[tuple[str, str]]:
         """Extract all listing URLs from a search results page."""
@@ -93,8 +140,9 @@ class AsyncBooliScraper:
     async def extract_listing_details(self, page: Page, url: str, source_type: str = 'till-salu') -> Optional[dict]:
         """Extract detailed info from an individual listing page."""
         try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=20000)
-            await asyncio.sleep(self.delay)
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            # Random delay to look more human
+            await asyncio.sleep(self.delay + random.uniform(0.3, 1.5))
             
             listing_id = url.split('/')[-1]
             body_text = await page.inner_text('body')
@@ -316,8 +364,9 @@ class AsyncBooliScraper:
                 url = f"{base_url}?page={page_num}" if page_num > 1 else base_url
             
             try:
-                await page.goto(url, wait_until='networkidle', timeout=30000)
-                await asyncio.sleep(self.delay)
+                await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+                # Random delay to look more human
+                await asyncio.sleep(self.delay + random.uniform(0.5, 2.0))
                 
                 urls = await self.extract_listing_urls(page, source_type)
                 
@@ -449,12 +498,74 @@ class AsyncBooliScraper:
         3. Retry failed pages up to max_retries times
         """
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            # Launch with stealth settings
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                ]
+            )
             
+            # Stealth context with realistic browser fingerprint
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='sv-SE',
+                timezone_id='Europe/Stockholm',
+                geolocation={'latitude': 59.3293, 'longitude': 18.0686},
+                permissions=['geolocation'],
+                java_script_enabled=True,
+                bypass_csp=True,
+                extra_http_headers={
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
+                }
             )
+            
+            # Inject stealth scripts to hide automation
+            await context.add_init_script("""
+                // Hide webdriver
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                
+                // Hide automation
+                window.navigator.chrome = {
+                    runtime: {}
+                };
+                
+                // Fake plugins
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                
+                // Fake languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['sv-SE', 'sv', 'en-US', 'en']
+                });
+                
+                // Hide permissions
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            """)
             
             try:
                 # === PHASE 1: Collect URLs from all sources ===
@@ -462,21 +573,30 @@ class AsyncBooliScraper:
                 
                 # Handle cookie consent once (use first source)
                 first_source_url = list(self.SOURCES.values())[0]
-                await page.goto(first_source_url, wait_until='networkidle', timeout=30000)
-                await asyncio.sleep(2)
+                print(f"  Loading first page: {first_source_url}")
+                await page.goto(first_source_url, wait_until='domcontentloaded', timeout=60000)
+                await asyncio.sleep(3)
+                
+                # Try to accept cookies
                 try:
                     cookie_button = await page.query_selector('button:has-text("Acceptera"), button:has-text("Godkänn")')
                     if cookie_button:
                         await cookie_button.click()
                         await asyncio.sleep(1)
+                        print("  Accepted cookies")
                 except Exception:
                     pass
                 
                 # Get page counts for all sources
                 source_pages = {}
                 for source_type, base_url in self.SOURCES.items():
-                    await page.goto(base_url, wait_until='networkidle', timeout=60000)
-                    await asyncio.sleep(1)
+                    await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
+                    await asyncio.sleep(2)
+                    
+                    # Debug: print page title to verify load
+                    title = await page.title()
+                    print(f"  DEBUG: {source_type} - Title: {title[:50]}...")
+                    
                     pages = await self.get_total_pages(page)
                     if max_pages:
                         pages = min(pages, max_pages)
@@ -488,9 +608,10 @@ class AsyncBooliScraper:
                 
                 # Get first page URLs from each source
                 for source_type, base_url in self.SOURCES.items():
-                    await page.goto(base_url, wait_until='networkidle', timeout=30000)
-                    await asyncio.sleep(1)
+                    await page.goto(base_url, wait_until='domcontentloaded', timeout=60000)
+                    await asyncio.sleep(2)
                     first_urls = await self.extract_listing_urls(page, source_type)
+                    print(f"  DEBUG: {source_type} found {len(first_urls)} URLs on first page")
                     # Convert to tuple format with is_duplicate flag
                     for u in first_urls:
                         is_duplicate = u[0] in [x[0] for x in self.listing_urls]
@@ -512,10 +633,7 @@ class AsyncBooliScraper:
                 worker_contexts = []
                 
                 for i in range(self.num_workers):
-                    worker_context = await browser.new_context(
-                        viewport={'width': 1920, 'height': 1080},
-                        user_agent=f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Worker/{i}'
-                    )
+                    worker_context = await self.create_stealth_context(browser, i)
                     worker_contexts.append(worker_context)
                     workers.append(asyncio.create_task(
                         self.url_collector_worker(worker_context, page_queue, failed_page_queue)
@@ -551,10 +669,7 @@ class AsyncBooliScraper:
                 worker_contexts = []
                 
                 for i in range(self.num_workers):
-                    worker_context = await browser.new_context(
-                        viewport={'width': 1920, 'height': 1080},
-                        user_agent=f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Detail/{i}'
-                    )
+                    worker_context = await self.create_stealth_context(browser, i)
                     worker_contexts.append(worker_context)
                     workers.append(asyncio.create_task(
                         self.detail_scraper_worker(worker_context, url_queue, failed_url_queue)
